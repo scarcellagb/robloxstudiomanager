@@ -4,10 +4,11 @@ emulate zsh
 setopt no_nomatch
 unsetopt xtrace
 export LC_ALL=C
+umask 077
 
-MANAGER_BUILD="4.2.0"
-MANAGER_DATA="19/08/2026"
-MANAGER_FIRMA="f9a4333d3c567c91dba6d9803f04ca489815f24788c20821c03ea08e4635ecbf"
+MANAGER_BUILD="4.2.1"
+MANAGER_DATA="20/08/2026"
+MANAGER_FIRMA="3cacf92bf8625a5cded6df5d6541ba1aa9397b0bb5b8d97a7ec7ade7b6bf318b"
 
 self="${0:A}"
 xattr -d com.apple.quarantine "$self" 2>/dev/null || true
@@ -43,7 +44,7 @@ temporanei="$strumenti/Temporanei"
 sistema="$base/Sistema"
 backupcomando="$sistema/comando.txt"
 integritafile="$sistema/integrita.txt"
-runtimecopy="/tmp/robloxstudio${UID}$$.txt"
+runtimecopy=""
 catalogo="$strumenti/catalogo.txt"
 stato="$strumenti/stato.txt"
 blocco="$strumenti/blocco.txt"
@@ -56,9 +57,42 @@ cdnbase="https://setup.rbxcdn.com/mac"
 storicourl="$cdnbase/DeployHistory.txt"
 resolverurl="https://setup-rbxcdn.github.io/mac/DeployHistory.txt"
 
-mkdir -p "$versioni" "$strumenti" "$temporanei" 2>/dev/null
-touch "$catalogo" "$stato" "$blocco" "$compatibilita" "$webcache" "$correnteweb" 2>/dev/null
+riparadirinterno() {
+    local p="$1"
+    if [[ -L "$p" ]]; then
+        rm -f "$p" 2>/dev/null || return 1
+    elif [[ -e "$p" && ! -d "$p" ]]; then
+        rm -f "$p" 2>/dev/null || return 1
+    fi
+    mkdir -p "$p" 2>/dev/null || return 1
+    return 0
+}
 
+riparafileinterno() {
+    local f="$1"
+    if [[ -L "$f" ]]; then
+        rm -f "$f" 2>/dev/null || return 1
+    elif [[ -e "$f" && ! -f "$f" ]]; then
+        rm -rf "$f" 2>/dev/null || return 1
+    fi
+    [[ -f "$f" ]] || : > "$f" 2>/dev/null || return 1
+    return 0
+}
+
+for p in "$versioni" "$strumenti" "$temporanei" "$sistema"; do
+    riparadirinterno "$p" || { print -r -- "Struttura interna non sicura."; exit 73; }
+done
+chmod 700 "$strumenti" "$temporanei" "$sistema" 2>/dev/null || true
+for f in "$catalogo" "$stato" "$blocco" "$compatibilita" "$webcache" "$correnteweb" "$backupcomando" "$integritafile"; do
+    riparafileinterno "$f" || { print -r -- "File interno non sicuro."; exit 73; }
+done
+runtimecopy="$(mktemp -t robloxstudio 2>/dev/null)"
+if [[ -z "$runtimecopy" || ! -f "$runtimecopy" || -L "$runtimecopy" ]]; then
+    print -r -- "Impossibile creare un file temporaneo sicuro."
+    exit 73
+fi
+
+[[ -L "$lockdir" ]] && rm -f "$lockdir" 2>/dev/null
 if ! mkdir "$lockdir" 2>/dev/null; then
     vecchio="$(cat "$lockdir/pid" 2>/dev/null)"
     if [[ "$vecchio" == "$$" ]]; then
@@ -633,6 +667,18 @@ pulisciriga() {
     tr -d '\r' | sed -e 's/[[:space:]]*$//'
 }
 
+hashvalido() {
+    [[ "$1" =~ '^version-[0-9a-fA-F]{16}$' ]]
+}
+
+versionevalida() {
+    [[ "$1" =~ '^0\.[0-9]+\.[0-9]+\.[0-9]+$' ]]
+}
+
+curlhttps() {
+    command curl --proto '=https' --proto-redir '=https' "$@"
+}
+
 normalizzacatalogo() {
     local tmp="$temporanei/catalogo.tmp"
     [[ -s "$catalogo" ]] || return 0
@@ -645,7 +691,7 @@ normalizzacatalogo() {
             h=$3
             gsub(/^[ \t]+|[ \t]+$/,"",v)
             gsub(/^[ \t]+|[ \t]+$/,"",h)
-            if(v ~ /^0\.[0-9]+\./ && h ~ /^version-/) print d,v,h
+            if(v ~ /^0\.[0-9]+\.[0-9]+\.[0-9]+$/ && (h=="version-hidden" || (length(h)==24 && h ~ /^version-[0-9a-fA-F]+$/))) print d,v,h
         }
     }' | awk -F '\t' 'BEGIN{OFS="\t"}
     {
@@ -702,7 +748,7 @@ normalizzaweb() {
     [[ -s "$webcache" ]] || return 0
     pulisciriga < "$webcache" | awk -F '\t' 'BEGIN{OFS="\t"}
     NF>=3 {
-        if($1 ~ /^version-/ && $3 ~ /^[0-9]+$/) print $1,$2,$3
+        if(length($1)==24 && $1 ~ /^version-[0-9a-fA-F]+$/ && $3 ~ /^[0-9]+$/) print $1,$2,$3
     }' | awk -F '\t' '!visti[$1]++' > "$tmp" 2>/dev/null
     mv "$tmp" "$webcache" 2>/dev/null
 }
@@ -720,7 +766,7 @@ preparadati() {
 
 firmafile() {
     local f="$1"
-    [[ -f "$f" ]] || return 1
+    [[ -f "$f" && ! -L "$f" ]] || return 1
     sed -E 's/^MANAGER_FIRMA="[^"]*"$/MANAGER_FIRMA=""/' "$f" 2>/dev/null | shasum -a 256 2>/dev/null | awk '{print $1}'
 }
 
@@ -734,19 +780,21 @@ scriviintegrita() {
 }
 
 copiaprotetta() {
-    local fonte="$1" destinazione="$2"
-    [[ -f "$fonte" ]] || return 1
-    mkdir -p "${destinazione:h}" 2>/dev/null || return 1
-    chmod u+w "$destinazione" 2>/dev/null || true
-    /bin/cp -X "$fonte" "$destinazione" 2>/dev/null || return 1
-    chmod 444 "$destinazione" 2>/dev/null || true
+    local fonte="$1" destinazione="$2" tmp
+    [[ -f "$fonte" && ! -L "$fonte" ]] || return 1
+    riparadirinterno "${destinazione:h}" || return 1
+    tmp="${destinazione:h}/.${destinazione:t}.$$"
+    rm -f "$tmp" 2>/dev/null
+    /bin/cp -X "$fonte" "$tmp" 2>/dev/null || return 1
+    chmod 444 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$destinazione" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
     return 0
 }
 
 assicurasistema() {
     local fs fb
 
-    [[ -d "$base" ]] || return 1
+    [[ -d "$base" && ! -L "$base" ]] || return 1
 
     fs="$(firmafile "$self" 2>/dev/null)"
 
@@ -765,9 +813,20 @@ assicurasistema() {
         exit 78
     fi
 
-    mkdir -p "$versioni" "$strumenti" "$temporanei" "$sistema" 2>/dev/null || true
+    riparadirinterno "$versioni" || return 1
+    riparadirinterno "$strumenti" || return 1
+    riparadirinterno "$temporanei" || return 1
+    riparadirinterno "$sistema" || return 1
+    chmod 700 "$strumenti" "$temporanei" "$sistema" 2>/dev/null || true
 
-    touch "$catalogo" "$stato" "$blocco" "$compatibilita" "$webcache" "$correnteweb" 2>/dev/null || true
+    riparafileinterno "$catalogo" || return 1
+    riparafileinterno "$stato" || return 1
+    riparafileinterno "$blocco" || return 1
+    riparafileinterno "$compatibilita" || return 1
+    riparafileinterno "$webcache" || return 1
+    riparafileinterno "$correnteweb" || return 1
+    [[ -L "$backupcomando" ]] && rm -f "$backupcomando" 2>/dev/null
+    [[ -L "$integritafile" ]] && rm -f "$integritafile" 2>/dev/null
 
     fb="$(firmafile "$backupcomando" 2>/dev/null)"
     if [[ "$fb" != "$MANAGER_FIRMA" ]]; then
@@ -790,16 +849,20 @@ guardiasistema() {
 
     while true; do
         sleep 3
-        [[ -d "$base" ]] || return 0
+        [[ -d "$base" && ! -L "$base" ]] || return 0
 
-        mkdir -p "$versioni" "$strumenti" "$temporanei" "$sistema" 2>/dev/null || true
-
-        [[ -f "$catalogo" ]] || : > "$catalogo" 2>/dev/null
-        [[ -f "$stato" ]] || : > "$stato" 2>/dev/null
-        [[ -f "$blocco" ]] || : > "$blocco" 2>/dev/null
-        [[ -f "$compatibilita" ]] || : > "$compatibilita" 2>/dev/null
-        [[ -f "$webcache" ]] || : > "$webcache" 2>/dev/null
-        [[ -f "$correnteweb" ]] || : > "$correnteweb" 2>/dev/null
+        riparadirinterno "$versioni" || return 1
+        riparadirinterno "$strumenti" || return 1
+        riparadirinterno "$temporanei" || return 1
+        riparadirinterno "$sistema" || return 1
+        riparafileinterno "$catalogo" || return 1
+        riparafileinterno "$stato" || return 1
+        riparafileinterno "$blocco" || return 1
+        riparafileinterno "$compatibilita" || return 1
+        riparafileinterno "$webcache" || return 1
+        riparafileinterno "$correnteweb" || return 1
+        [[ -L "$backupcomando" ]] && rm -f "$backupcomando" 2>/dev/null
+        [[ -L "$integritafile" ]] && rm -f "$integritafile" 2>/dev/null
 
         fs="$(firmafile "$self" 2>/dev/null)"
         fb="$(firmafile "$backupcomando" 2>/dev/null)"
@@ -850,21 +913,13 @@ fermaguardia() {
 }
 
 puliscistrumenti() {
-    local file cartella nome
+    local file nome
     mkdir -p "$strumenti" "$temporanei" 2>/dev/null
     for file in "$strumenti"/*(N.); do
-        [[ "$file" == "${0:A}" ]] && continue
         nome="${file:t}"
         case "$nome" in
-            (robloxstudio.command|catalogo.txt|stato.txt|blocco.txt|compatibilita.txt|web.txt|corrente.txt) ;;
-            (*) rm -f "$file" 2>/dev/null ;;
-        esac
-    done
-    for cartella in "$strumenti"/*(N/) "$strumenti"/.*(N/); do
-        nome="${cartella:t}"
-        case "$nome" in
-            (Temporanei|temporanei|Avvio|avvio|.|..) ;;
-            (*) rm -rf "$cartella" 2>/dev/null ;;
+            (.DS_Store|aggiornaordine.command|ripararobloxstudio.command|unificarobloxstudio.command|aggiornacompatibilita.command|aggiornainterfaccia.command|aggiornapulizia.command|aggiornastrumenti.command|aggiornaverifica.command) rm -f "$file" 2>/dev/null ;;
+            (*) ;;
         esac
     done
     rm -rf "$strumenti/.avvio" 2>/dev/null || true
@@ -873,7 +928,7 @@ puliscistrumenti() {
 pulisciprogetto() {
     local d
 
-    find "$base" -maxdepth 3 -type f \( -iname 'readme' -o -iname 'readme.*' -o -iname 'leggimi' -o -iname 'leggimi.*' -o -iname 'istruzioni' -o -iname 'istruzioni.*' -o -name '.DS_Store' \) -delete 2>/dev/null
+    find "$base" -maxdepth 3 -type f -name '.DS_Store' -delete 2>/dev/null
 
     for d in "$versioni"/*(N/); do
         if [[ -z "$(find "$d" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
@@ -907,7 +962,7 @@ versioneminore() {
 }
 
 reteattiva() {
-    curl -s --connect-timeout 3 --max-time 6 -o /dev/null -w '%{http_code}' "$storicourl" 2>/dev/null | grep -q '^[23]'
+    curlhttps -s --connect-timeout 3 --max-time 6 -o /dev/null -w '%{http_code}' "$storicourl" 2>/dev/null | grep -q '^[23]'
 }
 
 versionecorrente() {
@@ -924,7 +979,7 @@ versionecorrente() {
         return 0
     fi
     tmp="$temporanei/corrente.tmp"
-    if curl -fsSL --connect-timeout 4 --max-time 10 "$storicourl" -o "$tmp" 2>/dev/null; then
+    if curlhttps -fsSL --connect-timeout 4 --max-time 10 "$storicourl" -o "$tmp" 2>/dev/null; then
         corrente="$(grep '^New Studio ' "$tmp" 2>/dev/null | tail -n 1 | sed -E 's/.*git hash: ([0-9.]+).*/\1/')"
         rm -f "$tmp"
         if [[ "$corrente" == 0.* ]]; then
@@ -953,7 +1008,7 @@ fondistorici() {
     fi
     awk -F '\t' 'BEGIN{OFS="\t"}
     FNR==NR {
-        if($3!="version-hidden") r[$1 SUBSEP $2]=$3
+        if(length($3)==24 && $3 ~ /^version-[0-9a-fA-F]+$/) r[$1 SUBSEP $2]=$3
         next
     }
     {
@@ -966,15 +1021,19 @@ fondistorici() {
 
 risolvihashversione() {
     local v="$1" h storico="$temporanei/risolto-singolo.txt" tmp="$temporanei/catalogo-risolto.tmp"
+    versionevalida "$v" || {
+        print -r -- "version-hidden"
+        return 1
+    }
     h="$(hashversione "$v")"
-    if [[ -n "$h" && "$h" != "version-hidden" ]]; then
+    if hashvalido "$h"; then
         print -r -- "$h"
         return 0
     fi
-    if curl -fsSL --connect-timeout 4 --max-time 12 --retry 1 "$resolverurl" -o "$storico" 2>/dev/null; then
+    if curlhttps -fsSL --connect-timeout 4 --max-time 12 --retry 1 "$resolverurl" -o "$storico" 2>/dev/null; then
         h="$(grep '^New Studio version-' "$storico" 2>/dev/null | grep -F "git hash: $v " | sed -E 's/^New Studio (version-[^ ]+) .*/\1/' | head -n 1)"
         rm -f "$storico" 2>/dev/null
-        if [[ "$h" == version-* && "$h" != "version-hidden" ]]; then
+        if hashvalido "$h"; then
             awk -F '\t' -v v="$v" -v h="$h" 'BEGIN{OFS="\t"} {if($2==v)$3=h; print}' "$catalogo" > "$tmp" 2>/dev/null
             mv "$tmp" "$catalogo" 2>/dev/null
             normalizzacatalogo
@@ -997,14 +1056,14 @@ aggiornacatalogo() {
     [[ "$prima" == <-> ]] || prima=0
     sezione "Aggiornamento catalogo"
     spinneravvia "Scarico la cronologia ufficiale Roblox"
-    if ! curl -fsSL --connect-timeout 6 --max-time 25 --retry 2 --retry-delay 1 "$storicourl" -o "$storico" 2>/dev/null; then
+    if ! curlhttps -fsSL --connect-timeout 6 --max-time 25 --retry 2 --retry-delay 1 "$storicourl" -o "$storico" 2>/dev/null; then
         spinnerferma
         errore "Cronologia ufficiale non raggiungibile. Controlla la connessione e riprova."
         return 1
     fi
     spinnerferma
     spinneravvia "Risolvo gli identificativi nascosti"
-    if curl -fsSL --connect-timeout 5 --max-time 18 --retry 1 "$resolverurl" -o "$risolto" 2>/dev/null; then
+    if curlhttps -fsSL --connect-timeout 5 --max-time 18 --retry 1 "$resolverurl" -o "$risolto" 2>/dev/null; then
         resolverok=1
     else
         : > "$risolto"
@@ -1042,11 +1101,11 @@ sincronizzaufficiale() {
     local ufficiale="$temporanei/ufficiale.intel.txt"
     local unito="$temporanei/unito.intel.txt"
     local corrente
-    if ! curl -fsSL --connect-timeout 5 --max-time 20 --retry 1 "$storicourl" -o "$storico" 2>/dev/null; then
+    if ! curlhttps -fsSL --connect-timeout 5 --max-time 20 --retry 1 "$storicourl" -o "$storico" 2>/dev/null; then
         rm -f "$storico" "$risolto" "$ufficiale" "$unito" 2>/dev/null
         return 1
     fi
-    if ! curl -fsSL --connect-timeout 5 --max-time 15 --retry 1 "$resolverurl" -o "$risolto" 2>/dev/null; then
+    if ! curlhttps -fsSL --connect-timeout 5 --max-time 15 --retry 1 "$resolverurl" -o "$risolto" 2>/dev/null; then
         : > "$risolto"
     fi
     fondistorici "$storico" "$risolto" "$ufficiale"
@@ -1062,7 +1121,14 @@ sincronizzaufficiale() {
 }
 
 hashversione() {
-    awk -F '\t' -v v="$1" '$2==v {print $3; exit}' "$catalogo" 2>/dev/null
+    local h
+    versionevalida "$1" || return 1
+    h="$(awk -F '\t' -v v="$1" '$2==v {print $3; exit}' "$catalogo" 2>/dev/null)"
+    if hashvalido "$h" || [[ "$h" == "version-hidden" ]]; then
+        print -r -- "$h"
+        return 0
+    fi
+    return 1
 }
 
 dataversione() {
@@ -1146,6 +1212,7 @@ cdncache() {
 
 cdnsalva() {
     local h="$1" r="$2" tmp="$temporanei/webcache.tmp"
+    hashvalido "$h" || return 1
     awk -F '\t' -v h="$h" '$1!=h {print}' "$webcache" > "$tmp" 2>/dev/null
     printf '%s\t%s\t%s\n' "$h" "$r" "$(date +%s)" >> "$tmp"
     mv "$tmp" "$webcache" 2>/dev/null
@@ -1157,7 +1224,11 @@ cdnverifica() {
         print -r -- "hash nascosto"
         return 0
     fi
-    codice="$(curl -sIL --connect-timeout 4 --max-time 8 -o /dev/null -w '%{http_code}' "$cdnbase/$h-RobloxStudioApp.zip" 2>/dev/null)"
+    if ! hashvalido "$h"; then
+        print -r -- "hash non valido"
+        return 0
+    fi
+    codice="$(curlhttps -sIL --connect-timeout 4 --max-time 8 -o /dev/null -w '%{http_code}' "$cdnbase/$h-RobloxStudioApp.zip" 2>/dev/null)"
     case "$codice" in
         (200|206|301|302|307|308) print -r -- "disponibile" ;;
         (404|410) print -r -- "non disponibile" ;;
@@ -1178,6 +1249,11 @@ cdnlotto() {
     for h in "${hash[@]}"; do
         if [[ -z "$h" || "$h" == "version-hidden" ]]; then
             CDNRIS+=("hash nascosto")
+            (( fatti++ ))
+            continue
+        fi
+        if ! hashvalido "$h"; then
+            CDNRIS+=("hash non valido")
             (( fatti++ ))
             continue
         fi
@@ -1238,15 +1314,16 @@ datiapp() {
     if [[ "$DATA" != <->-<->-<-> ]]; then
         DATA="0000-00-00"
     fi
-    if [[ "$VERS" != 0.* ]]; then
+    if ! versionevalida "$VERS"; then
         nome="${app:t:r}"
         VERS="${nome##* }"
     fi
-    [[ "$VERS" == 0.* ]] || VERS="sconosciuta"
+    versionevalida "$VERS" || VERS="sconosciuta"
 }
 
 trovaapp() {
     local v="$1"
+    versionevalida "$v" || return 1
     find "$versioni" -mindepth 2 -maxdepth 2 -type d -name "RobloxStudio $v.app" -print -quit 2>/dev/null
 }
 
@@ -1750,7 +1827,7 @@ migliorescelta() {
 
 dimensioneremota() {
     local url="$1" n
-    n="$(curl -sIL --connect-timeout 5 --max-time 12 "$url" 2>/dev/null | awk '{k=tolower($1)} k=="content-length:" {n=$2} END{gsub(/\r/,"",n); print n+0}')"
+    n="$(curlhttps -sIL --connect-timeout 5 --max-time 12 "$url" 2>/dev/null | awk '{k=tolower($1)} k=="content-length:" {n=$2} END{gsub(/\r/,"",n); print n+0}')"
     [[ "$n" == <-> ]] || n=0
     print -r -- "$n"
 }
@@ -1759,7 +1836,7 @@ scaricafile() {
     local url="$1" dest="$2" tot="$3"
     local pid cur pct vel t0 now dt eta rc testo
     rm -f "$dest" 2>/dev/null
-    curl -fsSL --connect-timeout 8 --max-time 5400 --retry 2 --retry-delay 2 -o "$dest" "$url" 2>/dev/null &
+    curlhttps -fsSL --connect-timeout 8 --max-time 5400 --retry 2 --retry-delay 2 -o "$dest" "$url" 2>/dev/null &
     pid=$!
     t0="$(date +%s)"
     [[ -t 1 ]] && printf '\033[?25l'
@@ -1793,13 +1870,47 @@ scaricafile() {
     return $rc
 }
 
+zipvalido() {
+    local f="$1" n voce
+    [[ -f "$f" && ! -L "$f" ]] || return 1
+    n="$(dimensionefile "$f")"
+    [[ "$n" == <-> ]] || return 1
+    (( n >= 1048576 && n <= 4294967296 )) || return 1
+    /usr/bin/unzip -tqq "$f" >/dev/null 2>&1 || return 1
+    while IFS= read -r voce; do
+        [[ -n "$voce" ]] || continue
+        case "$voce" in
+            (/*|..|../*|*/../*|*/..) return 1 ;;
+        esac
+    done < <(/usr/bin/unzip -Z1 "$f" 2>/dev/null)
+    return 0
+}
+
+verificaappufficiale() {
+    local app="$1" attesa="${2:-}" info team ident breve build requisito
+    [[ -d "$app" && -f "$app/Contents/Info.plist" ]] || return 1
+    requisito='anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "2CFABCH843"'
+    /usr/bin/codesign --verify --deep --strict -R="$requisito" "$app" >/dev/null 2>&1 || return 1
+    info="$(/usr/bin/codesign -dvvv "$app" 2>&1)"
+    team="$(print -r -- "$info" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
+    ident="$(print -r -- "$info" | sed -n 's/^Identifier=//p' | head -n 1)"
+    [[ "$team" == "2CFABCH843" ]] || return 1
+    [[ "${(L)ident}" == "com.roblox.robloxstudio" ]] || return 1
+    print -r -- "$info" | grep -Fqi 'Developer ID Application: Roblox Corporation (2CFABCH843)' || return 1
+    if [[ -n "$attesa" ]]; then
+        versionevalida "$attesa" || return 1
+        breve="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null)"
+        build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist" 2>/dev/null)"
+        [[ "$breve" == "$attesa" || "$build" == "$attesa" ]] || return 1
+    fi
+    return 0
+}
+
 preparaappmac() {
-    local app="$1" exe
+    local app="$1" attesa="${2:-}"
     [[ -d "$app" ]] || return 1
+    verificaappufficiale "$app" "$attesa" || return 2
     xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
-    for exe in "$app/Contents/MacOS/"*(N.); do
-        chmod 755 "$exe" 2>/dev/null || true
-    done
     return 0
 }
 
@@ -1808,7 +1919,7 @@ trovaarchivio() {
     for f in "$archivio"/*(N) "$HOME/Downloads"/*(N); do
         [[ -e "$f" ]] || continue
         case "${f:t}" in
-            (*"$v"*.zip|*"$v"*.dmg|*"$v"*.7z|*"$v"*.app)
+            (*"$v"*.zip|*"$v"*.dmg|*"$v"*.app)
                 print -r -- "$f"
                 return 0
                 ;;
@@ -1818,7 +1929,7 @@ trovaarchivio() {
 }
 
 preparaarchivio() {
-    local fonte="$1" destinazione="$2" ext="${fonte:e:l}" mountpoint tool sorgente
+    local fonte="$1" destinazione="$2" ext="${fonte:e:l}" mountpoint sorgente
     rm -rf "$destinazione" 2>/dev/null
     mkdir -p "$destinazione" 2>/dev/null
 
@@ -1830,6 +1941,7 @@ preparaarchivio() {
 
     case "$ext" in
         (zip)
+            zipvalido "$fonte" || return 1
             ditto -x -k "$fonte" "$destinazione" >/dev/null 2>&1 || return 1
             ;;
         (dmg)
@@ -1847,16 +1959,6 @@ preparaarchivio() {
             rm -rf "$mountpoint" 2>/dev/null
             [[ -n "$sorgente" ]] || return 1
             ;;
-        (7z)
-            if command -v 7zz >/dev/null 2>&1; then
-                tool="$(command -v 7zz)"
-            elif command -v 7z >/dev/null 2>&1; then
-                tool="$(command -v 7z)"
-            else
-                return 2
-            fi
-            "$tool" x -y "-o$destinazione" "$fonte" >/dev/null 2>&1 || return 1
-            ;;
         (*)
             return 1
             ;;
@@ -1870,6 +1972,7 @@ preparaarchivio() {
 
 installadaarchivio() {
     local v="$1" riga d h dummy fonte risposta destinazione app prova sorgente rc sostituisci=0
+    versionevalida "$v" || { errore "Versione non valida."; return 1; }
     catalogopronto || return 1
     riga="$(awk -F '\t' -v v="$v" '$2==v {print; exit}' "$catalogo" 2>/dev/null)"
     [[ -n "$riga" ]] || {
@@ -1885,7 +1988,7 @@ installadaarchivio() {
         avviso "Il pacchetto ufficiale non e disponibile e non ho trovato una copia locale."
         nota "Metti una copia che possiedi in:"
         campo "Archivio" "$archivio"
-        nota "Formati supportati: .zip, .dmg, .app; .7z se 7z o 7zz e installato."
+        nota "Formati supportati: .zip, .dmg e .app."
         nota "Il nome del file deve contenere il numero di versione, per esempio $v."
         return 1
     fi
@@ -1909,13 +2012,13 @@ installadaarchivio() {
     rc=$?
     spinnerferma
 
-    if (( rc == 2 )); then
-        errore "Per estrarre .7z serve il comando 7z oppure 7zz."
+    if (( rc != 0 )) || [[ -z "$sorgente" || ! -d "$sorgente" ]]; then
+        errore "La copia locale non contiene una Roblox Studio.app utilizzabile."
         rm -rf "$prova" 2>/dev/null
         return 1
     fi
-    if (( rc != 0 )) || [[ -z "$sorgente" || ! -d "$sorgente" ]]; then
-        errore "La copia locale non contiene una Roblox Studio.app utilizzabile."
+    if ! verificaappufficiale "$sorgente" "$v"; then
+        errore "La copia locale non ha una firma Roblox valida o non corrisponde alla versione richiesta."
         rm -rf "$prova" 2>/dev/null
         return 1
     fi
@@ -1939,6 +2042,11 @@ installadaarchivio() {
         errore "Importazione non riuscita."
         return 1
     }
+    if ! preparaappmac "$app" "$v"; then
+        errore "La verifica finale della firma Roblox non e riuscita."
+        rm -rf "$destinazione" 2>/dev/null
+        return 1
+    fi
 
     bloccaapp "$app"
     compatapp "$app" "no" >/dev/null 2>&1 || true
@@ -1951,6 +2059,10 @@ modalitaarchivio() {
     local app="$1"
     [[ -d "$app" ]] || return 1
     datiapp "$app"
+    if ! verificaappufficiale "$app" "$VERS"; then
+        errore "Avvio bloccato: firma Roblox non valida o applicazione modificata."
+        return 1
+    fi
     titolo
     sezione "Modalita archivio"
     campo "Versione" "$VERS"
@@ -1963,6 +2075,7 @@ modalitaarchivio() {
 
 scaricaversione() {
     local v="$1" riga d h dummy destinazione app zip estrazione sorgente tot esito risposta sostituisci=0
+    versionevalida "$v" || { errore "Versione non valida."; return 1; }
     catalogopronto || return 1
     riga="$(awk -F '	' -v v="$v" '$2==v {print; exit}' "$catalogo" 2>/dev/null)"
     if [[ -z "$riga" ]]; then
@@ -2026,6 +2139,13 @@ scaricaversione() {
     fi
     ok "Pacchetto scaricato: $(megabyte "$(dimensionefile "$zip")") MB"
     spinneravvia "Verifico ed estraggo l'applicazione"
+    if ! zipvalido "$zip"; then
+        spinnerferma
+        errore "Il pacchetto non supera i controlli di sicurezza."
+        rm -f "$zip" 2>/dev/null
+        rm -rf "$estrazione" 2>/dev/null
+        return 1
+    fi
     if ! ditto -x -k "$zip" "$estrazione" >/dev/null 2>&1; then
         spinnerferma
         errore "Archivio danneggiato. La copia gia presente non e stata modificata."
@@ -2037,6 +2157,12 @@ scaricaversione() {
     sorgente="$(find "$estrazione" -maxdepth 5 -type d \( -name 'RobloxStudio.app' -o -name 'Roblox Studio.app' \) -print -quit 2>/dev/null)"
     if [[ -z "$sorgente" ]]; then
         errore "Nell'archivio non c'e nessuna applicazione Roblox Studio."
+        rm -f "$zip" 2>/dev/null
+        rm -rf "$estrazione" 2>/dev/null
+        return 1
+    fi
+    if ! verificaappufficiale "$sorgente" "$v"; then
+        errore "Firma Roblox non valida o versione del pacchetto non corrispondente."
         rm -f "$zip" 2>/dev/null
         rm -rf "$estrazione" 2>/dev/null
         return 1
@@ -2063,7 +2189,11 @@ scaricaversione() {
     fi
     rm -rf "$estrazione" 2>/dev/null
     rm -f "$zip" 2>/dev/null
-    preparaappmac "$app"
+    if ! preparaappmac "$app" "$v"; then
+        errore "La verifica finale della firma Roblox non e riuscita."
+        rm -rf "$destinazione" 2>/dev/null
+        return 1
+    fi
     if (( sostituisci == 1 )); then
         rimuovirecord "$v"
     fi
@@ -2220,6 +2350,7 @@ sproteggiprova() {
 
 verificatemp() {
     local v="$1" riga d h dummy zip estrazione cartella app sorgente tot esito rc=4
+    versionevalida "$v" || { errore "Versione non valida."; return 1; }
     riga="$(awk -F '\t' -v v="$v" '$2==v {print; exit}' "$catalogo" 2>/dev/null)"
     [[ -n "$riga" ]] || {
         errore "Versione non presente nel catalogo."
@@ -2256,6 +2387,13 @@ verificatemp() {
         return 1
     fi
     spinneravvia "Estraggo la build di prova"
+    if ! zipvalido "$zip"; then
+        spinnerferma
+        errore "Il pacchetto di prova non supera i controlli di sicurezza."
+        rm -f "$zip" 2>/dev/null
+        rm -rf "$estrazione" 2>/dev/null
+        return 1
+    fi
     if ! ditto -x -k "$zip" "$estrazione/origine" >/dev/null 2>&1; then
         spinnerferma
         errore "Estrazione della build di prova non riuscita."
@@ -2271,6 +2409,12 @@ verificatemp() {
         rm -rf "$estrazione" 2>/dev/null
         return 1
     fi
+    if ! verificaappufficiale "$sorgente" "$v"; then
+        errore "Firma Roblox non valida o versione del pacchetto non corrispondente."
+        rm -f "$zip" 2>/dev/null
+        rm -rf "$estrazione" 2>/dev/null
+        return 1
+    fi
     mv "$sorgente" "$app" 2>/dev/null
     rm -rf "$estrazione/origine" 2>/dev/null
     rm -f "$zip" 2>/dev/null
@@ -2279,7 +2423,11 @@ verificatemp() {
         rm -rf "$estrazione" 2>/dev/null
         return 1
     }
-    preparaappmac "$app"
+    if ! preparaappmac "$app" "$v"; then
+        errore "La verifica finale della firma Roblox non e riuscita."
+        rm -rf "$estrazione" 2>/dev/null
+        return 1
+    fi
     proteggiprova "$app"
     titolo
     testaapp "$app" rapida
@@ -2770,6 +2918,11 @@ testaapp() {
     fi
     datiapp "$app"
     sezione "Verifica out of date"
+    if ! verificaappufficiale "$app" "$VERS"; then
+        salvastato "$DATA" "$VERS" "nonavviabile" "firma Roblox non valida o applicazione modificata"
+        errore "Verifica bloccata: firma Roblox non valida o applicazione modificata."
+        return 2
+    fi
     campo "Data build" "$(datavisibile "$DATA")"
     campo "Versione" "$VERS"
     compatapp "$app" "no" >/dev/null 2>&1
@@ -3019,7 +3172,10 @@ menuverifiche() {
 apriapp() {
     local app="$1" conferma
     datiapp "$app"
-    preparaappmac "$app"
+    if ! preparaappmac "$app" "$VERS"; then
+        errore "Avvio bloccato: firma Roblox non valida o applicazione modificata."
+        return 1
+    fi
     compatassicura "$app" "$VERS"
     calcolalimiti
     local codice
@@ -3284,29 +3440,29 @@ puliscitemporanei() {
 }
 
 puliscidownload() {
-    local f trovati=0
-    local -a lista
-    lista=("${(@f)$(find "$HOME/Downloads" -maxdepth 1 -type f \( -iname 'RobloxStudio*.zip' -o -iname 'Roblox Studio*.zip' -o -iname 'RobloxStudio*.dmg' -o -iname 'Roblox Studio*.dmg' -o -iname 'RobloxStudio*.pkg' -o -iname 'Roblox Studio*.pkg' -o -iname 'RobloxStudio*.7z' -o -iname 'RobloxStudioInstaller*' -o -iname 'aggiorna*robloxstudio*.command' -o -iname 'aggiornaordine.command' -o -iname 'ripararobloxstudio.command' -o -iname 'unificarobloxstudio.command' -o -iname 'aggiornacompatibilita.command' -o -iname 'aggiornainterfaccia.command' -o -iname 'aggiornapulizia.command' -o -iname 'aggiornastrumenti.command' -o -iname 'aggiornaverifica.command' -o -iname 'leggimi*.txt' -o -iname 'readme*.txt' -o -iname 'readme*.md' \) -print 2>/dev/null)}")
-    for f in "${lista[@]}"; do
-        [[ -n "$f" ]] || continue
-        rm -f "$f" 2>/dev/null
-        trovati=1
-    done
-    lista=("${(@f)$(find "$base" -maxdepth 1 -type f \( -iname 'readme*' -o -iname 'leggimi*' -o -iname 'istruzioni*' \) -print 2>/dev/null)}")
-    for f in "${lista[@]}"; do
-        [[ -n "$f" ]] || continue
-        rm -f "$f" 2>/dev/null
-        trovati=1
+    local f trovati=0 nome
+    local -a nomi
+    nomi=(aggiornaordine.command ripararobloxstudio.command unificarobloxstudio.command aggiornacompatibilita.command aggiornainterfaccia.command aggiornapulizia.command aggiornastrumenti.command aggiornaverifica.command)
+    for nome in "${nomi[@]}"; do
+        f="$HOME/Downloads/$nome"
+        if [[ -f "$f" && ! -L "$f" ]]; then
+            rm -f "$f" 2>/dev/null
+            trovati=1
+        fi
     done
     if (( trovati == 0 )); then
-        ok "Nessun file superfluo da rimuovere."
+        ok "Nessun comando temporaneo del manager da rimuovere."
     else
-        ok "Installer, comandi vecchi e file di istruzioni rimossi."
+        ok "Comandi temporanei del manager rimossi."
     fi
 }
 
 puliscilog() {
     local f
+    if [[ -L "$logroot" ]]; then
+        errore "Pulizia log annullata: il percorso dei log e un collegamento simbolico."
+        return 1
+    fi
     if [[ -d "$logroot" ]]; then
         for f in "$logroot"/*(N) "$logroot"/.*(N); do
             case "${f:t}" in
@@ -3354,7 +3510,7 @@ menupulizia() {
         titolo
         sezione "Pulizia"
         voce 1 "File temporanei"
-        voce 2 "Installer e comandi vecchi in Download"
+        voce 2 "Comandi temporanei del manager in Download"
         voce 3 "Log di Roblox Studio"
         voce 4 "Versioni rifiutate da Roblox"
         voce 5 "Versioni incompatibili con il Mac"
@@ -3386,53 +3542,38 @@ menupulizia() {
     done
 }
 
-importaaggiornamento() {
-    local sorgente="" destinazione="${0:A}"
-
-    if [[ -f "$HOME/Downloads/robloxstudio.txt" ]]; then
-        sorgente="$HOME/Downloads/robloxstudio.txt"
-    elif [[ -f "$HOME/Downloads/robloxstudio.command" ]]; then
-        sorgente="$HOME/Downloads/robloxstudio.command"
-    fi
-
+controllaaggiornamento() {
+    local tmp="$temporanei/github-release.json" ultima risposta
     sezione "Aggiornamento manager"
-
-    if [[ -z "$sorgente" ]]; then
-        avviso "Nessun aggiornamento trovato direttamente in Download."
-        nota "Scarica robloxstudio.txt in Download e usa di nuovo questa voce."
+    spinneravvia "Controllo la release stabile su GitHub"
+    if ! curlhttps -fsSL --connect-timeout 5 --max-time 15 --retry 1 'https://api.github.com/repos/scarcellagb/robloxstudiomanager/releases/latest' -o "$tmp" 2>/dev/null; then
+        spinnerferma
+        errore "Non riesco a controllare GitHub in questo momento."
+        rm -f "$tmp" 2>/dev/null
         return 1
     fi
-
-    if [[ "$(head -n 1 "$sorgente" 2>/dev/null)" != "#!/bin/zsh" ]]; then
-        errore "Il file scaricato non sembra un aggiornamento valido."
+    spinnerferma
+    ultima="$(sed -nE 's/^[[:space:]]*"tag_name":[[:space:]]*"v?([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' "$tmp" | head -n 1)"
+    rm -f "$tmp" 2>/dev/null
+    if [[ ! "$ultima" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then
+        errore "La risposta di GitHub non contiene una versione valida."
         return 1
     fi
-
-    fermaguardia
-    chmod 755 "$destinazione" 2>/dev/null || true
-    xattr -d com.apple.quarantine "$sorgente" 2>/dev/null || true
-
-    if ! /bin/cp -X "$sorgente" "$destinazione" 2>/dev/null; then
-        errore "Non riesco a sostituire il manager."
-        assicurasistema
-        avviaguardia
-        return 1
+    campo "Versione installata" "$MANAGER_BUILD"
+    campo "Ultima stabile" "$ultima"
+    if [[ "$ultima" == "$MANAGER_BUILD" ]] || ! versioneminore "$MANAGER_BUILD" "$ultima"; then
+        ok "Il manager e aggiornato."
+        return 0
     fi
-
-    chmod 755 "$destinazione" 2>/dev/null || true
-    xattr -d com.apple.quarantine "$destinazione" 2>/dev/null || true
-    rm -f "$sorgente" 2>/dev/null || true
-
-    chmod u+w "$backupcomando" "$integritafile" 2>/dev/null || true
-    rm -f "$backupcomando" "$integritafile" 2>/dev/null || true
-
-    puliscistrumenti
-    pulisciprogetto
-
-    ok "Manager aggiornato."
-    nota "Riavvio il manager con la nuova versione."
-    sleep 0.5
-    exec "$destinazione"
+    print
+    avviso "E disponibile una nuova versione stabile."
+    nota "Per sicurezza il manager non esegue file di aggiornamento scaricati automaticamente."
+    domanda "Aprire la release ufficiale su GitHub [s/N]:"
+    IFS= read -r risposta || return 0
+    case "${(L)risposta}" in
+        (s|si|y|yes) open 'https://github.com/scarcellagb/robloxstudiomanager/releases/latest' >/dev/null 2>&1 ;;
+        (*) ;;
+    esac
 }
 
 
@@ -3445,7 +3586,7 @@ menumanutenzione() {
         voce 2 "Blocco aggiornamenti"
         voce 3 "Riordina cartelle e archivi"
         voce 4 "Pulizia"
-        voce 5 "Installa aggiornamento da Download"
+        voce 5 "Controlla aggiornamenti GitHub"
         voce 0 "Torna indietro"
         print
         domanda "Scelta:"
@@ -3455,7 +3596,7 @@ menumanutenzione() {
             (2) menublocco; pausa ;;
             (3) titolo; sezione "Riordino"; print; spinneravvia "Riordino in corso"; ordina; spinnerferma; pausa ;;
             (4) menupulizia ;;
-            (5) titolo; importaaggiornamento; pausa ;;
+            (5) titolo; controllaaggiornamento; pausa ;;
             (0) return 0 ;;
             (*) ;;
         esac
@@ -3490,7 +3631,8 @@ diagnostica() {
     n="$(wc -l < "$catalogo" 2>/dev/null | tr -d ' ')"
     campo "Build in catalogo" "${n:-0}"
     campo "Rilevamento" "Roblox ufficiale + hash risolti + test locale"
-    campo "Integrita" "autoverifica e ripristino attivi"
+    campo "Integrita" "SHA-256 locale e ripristino runtime"
+    campo "Firma applicazioni" "Roblox 2CFABCH843 obbligatoria"
     campo "Validita test verde" "12 ore"
     elencoapp
     campo "Versioni installate" "${#APPS}"

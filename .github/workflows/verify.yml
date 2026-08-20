@@ -1,0 +1,52 @@
+name: verify
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y zsh
+      - run: zsh -n Strumenti/robloxstudio.command
+      - run: sha256sum -c SHA256SUMS
+      - shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import re
+          import sys
+
+          script_path = Path("Strumenti/robloxstudio.command")
+          backup_path = Path("Sistema/comando.txt")
+          script = script_path.read_text()
+          match = re.search(r'^MANAGER_FIRMA="([0-9a-f]{64})"$', script, re.M)
+          if not match:
+              sys.exit(1)
+          canonical = re.sub(r'^MANAGER_FIRMA="[^"]*"$', 'MANAGER_FIRMA=""', script, flags=re.M)
+          if hashlib.sha256(canonical.encode()).hexdigest() != match.group(1):
+              sys.exit(1)
+          if script_path.read_bytes() != backup_path.read_bytes():
+              sys.exit(1)
+          comments = [line for line in script.splitlines() if re.match(r'^\s*#', line)]
+          if comments != ['#!/bin/zsh']:
+              sys.exit(1)
+          forbidden = ('Open' + 'AI', 'Chat' + 'GPT', 'Clau' + 'de', 'Anthro' + 'pic', '/' + 'Users' + '/', 'BEGIN PRIVATE' + ' KEY', 'gh' + 'p_', 'github' + '_pat_')
+          for path in Path('.').rglob('*'):
+              if not path.is_file() or '.git' in path.parts:
+                  continue
+              text = path.read_text(errors='ignore')
+              if any(value.lower() in text.lower() for value in forbidden):
+                  sys.exit(1)
+          PY
