@@ -6,9 +6,9 @@ unsetopt xtrace
 export LC_ALL=C
 umask 077
 
-MANAGER_BUILD="4.2.1"
+MANAGER_BUILD="4.3.0"
 MANAGER_DATA="20/08/2026"
-MANAGER_FIRMA="3cacf92bf8625a5cded6df5d6541ba1aa9397b0bb5b8d97a7ec7ade7b6bf318b"
+MANAGER_FIRMA="8a16125d605d2ac22c04ca15334057b17b65d5030998edaaa9815b2073c34501"
 
 self="${0:A}"
 xattr -d com.apple.quarantine "$self" 2>/dev/null || true
@@ -146,6 +146,7 @@ VERS=""
 VERIFICA_TTL=43200
 OOD_TTL=86400
 FUNZIONALI_SESSIONE=8
+RIDIMENSIONATA=0
 
 larghezzaterminale() {
     local dim c=0 r=0
@@ -197,7 +198,7 @@ aggiornalayout() {
 
 
 TRAPWINCH() {
-    aggiornalayout
+    RIDIMENSIONATA=1
 }
 
 
@@ -257,11 +258,12 @@ riga() {
 
 titolo() {
     aggiornalayout
+    RIDIMENSIONATA=0
     schermata
     print
     bordo "$cyan"
-    riga "ROBLOX STUDIO" "$cyan" centro
-    riga "MANAGER $MANAGER_BUILD - $MANAGER_DATA" "$gray" centro
+    riga "Roblox Studio" "$cyan" centro
+    riga "Manager $MANAGER_BUILD - $MANAGER_DATA" "$gray" centro
     bordo "$cyan"
 }
 
@@ -531,7 +533,10 @@ spinneravvia() {
     if [[ ! -t 1 ]]; then
         return 0
     fi
-    aggiornalayout
+    if (( RIDIMENSIONATA == 1 )); then
+        aggiornalayout
+        RIDIMENSIONATA=0
+    fi
     lim=$(( INT - 7 ))
     (( lim < 4 )) && lim=4
     msg="$(tronca "$msg" "$lim")"
@@ -545,7 +550,10 @@ spinneravvia() {
 
 barra() {
     local pct="$1" testo="$2" larghezzabarra pieni vuoti linea
-    aggiornalayout
+    if (( RIDIMENSIONATA == 1 )); then
+        aggiornalayout
+        RIDIMENSIONATA=0
+    fi
     (( pct < 0 )) && pct=0
     (( pct > 100 )) && pct=100
     larghezzabarra=$(( INT - ${#testo} - 8 ))
@@ -1769,7 +1777,7 @@ mostrainstallate() {
     if (( ${#RIGHEAPP} == 0 )); then
         sezione "Versioni installate"
         avviso "Nessuna versione presente nella cartella Versioni."
-        nota "Usa Catalogo e download per scaricarne una."
+        nota "Usa Versioni per cercare e scaricare una build."
         return 1
     fi
     sezione "Versioni installate"
@@ -1786,7 +1794,7 @@ mostrainstallate() {
     tabbordo
     print
     nota "Eta: RECENTE entro 30 giorni, PRECEDENTE 31-90, VECCHIA 91-180, STORICA oltre 180."
-    nota "L'asterisco indica uno stato Roblox dedotto dalle verifiche gia effettuate."
+    nota "Lo stato Roblox e considerato valido solo quando deriva da una verifica recente."
     return 0
 }
 
@@ -2693,34 +2701,179 @@ contafunzionali() {
     print -r -- "$n"
 }
 
-menucatalogo() {
+panoramaversioni() {
+    local corrente totale funzionali ood registrati installate riga d v s c
+    local piurecente="" piurecentedata="" piuvecchia="" piuvecchiadata=""
+    titolo
+    sezione "Panoramica versioni"
+    catalogopronto || return 0
+    spinneravvia "Aggiorno lo stato generale"
+    if reteattiva; then
+        corrente="$(versionecorrente)"
+    else
+        corrente="$(awk -F '\t' 'NR==1 {print $1}' "$correnteweb" 2>/dev/null)"
+    fi
+    totale="$(awk -F '\t' 'NF>=2 {n++} END {print n+0}' "$catalogo" 2>/dev/null)"
+    funzionali="$(contafunzionali)"
+    ood=0
+    registrati=0
+    while IFS=$'\t' read -r d v s _ _; do
+        [[ -n "$v" ]] || continue
+        (( registrati++ ))
+        if [[ "$s" == "obsoleta" ]] && testfresco "$v" "$OOD_TTL"; then
+            (( ood++ ))
+        fi
+        if [[ "$s" == "supportata" ]] && testfresco "$v" "$VERIFICA_TTL" && [[ "$(compatver "$v")" == "compatibile" ]]; then
+            if [[ -z "$piuvecchiadata" || "$d" < "$piuvecchiadata" ]]; then
+                piuvecchiadata="$d"
+                piuvecchia="$v"
+            fi
+            if [[ -z "$piurecentedata" || "$d" > "$piurecentedata" ]]; then
+                piurecentedata="$d"
+                piurecente="$v"
+            fi
+        fi
+    done < "$stato"
+    elencoapp
+    installate="${#APPS}"
+    spinnerferma
+    [[ "$corrente" == 0.* ]] && campo "Versione live" "$corrente"
+    campo "Build catalogate" "$totale"
+    campo "Funzionali verificate" "$funzionali"
+    campo "OUT OF DATE recenti" "$ood"
+    campo "Test registrati" "$registrati"
+    campo "Versioni installate" "$installate"
+    if [[ -n "$piurecente" ]]; then
+        campo "Funzionale piu recente" "$piurecente"
+        campo "Data piu recente" "$(datavisibile "$piurecentedata")"
+    fi
+    if [[ -n "$piuvecchia" ]]; then
+        campo "Funzionale piu vecchia" "$piuvecchia"
+        campo "Data piu vecchia" "$(datavisibile "$piuvecchiadata")"
+    fi
+    print
+    nota "Una build entra tra le funzionali solo dopo un test reale recente e una compatibilita Mac confermata."
+}
+
+confrontaversioni() {
+    local a b d h rawh cdn s c t fonte scelta
+    local -a versioni dati
+    catalogopronto || return 0
+    titolo
+    sezione "Confronta versioni"
+    domanda "Prima versione:"
+    IFS= read -r a || return 0
+    a="$(print -r -- "$a" | tr -d '[:space:]')"
+    versionevalida "$a" || { errore "Prima versione non valida."; return 0; }
+    domanda "Seconda versione:"
+    IFS= read -r b || return 0
+    b="$(print -r -- "$b" | tr -d '[:space:]')"
+    versionevalida "$b" || { errore "Seconda versione non valida."; return 0; }
+    [[ "$a" != "$b" ]] || { avviso "Scegli due versioni diverse."; return 0; }
+    versioni=("$a" "$b")
+    dati=()
+    spinneravvia "Raccolgo disponibilita e stato"
+    for v in "${versioni[@]}"; do
+        d="$(dataversione "$v")"
+        [[ -n "$d" ]] || { spinnerferma; errore "La versione $v non e presente nel catalogo."; return 0; }
+        rawh="$(hashversione "$v" 2>/dev/null)"
+        fonte="catalogo Roblox"
+        h="$rawh"
+        if [[ "$h" == "version-hidden" ]]; then
+            h="$(risolvihashversione "$v")"
+            if hashvalido "$h"; then
+                fonte="resolver storico"
+            else
+                fonte="hash non disponibile"
+            fi
+        fi
+        if hashvalido "$h"; then
+            cdn="$(cdncache "$h" 2>/dev/null)"
+            if [[ -z "$cdn" ]]; then
+                cdn="$(cdnverifica "$h")"
+                cdnsalva "$h" "$cdn" >/dev/null 2>&1 || true
+            fi
+        else
+            cdn="non verificata"
+        fi
+        s="$(statoroblox "$v" "$d")"
+        c="$(compatver "$v")"
+        [[ "$c" == "sconosciuta" || -z "$c" ]] && c="non verificata"
+        t="$(testover "$v")"
+        dati+=("$d"$'\t'"$v"$'\t'"$(fasciaversione "$v" "$d")"$'\t'"$cdn"$'\t'"$c"$'\t'"$s"$'\t'"$t"$'\t'"$fonte")
+    done
+    spinnerferma
+    titolo
+    sezione "Confronto"
+    for riga in "${dati[@]}"; do
+        IFS=$'\t' read -r d v eta cdn c s t fonte <<< "$riga"
+        campo "Versione" "$v"
+        campo "Data build" "$(datavisibile "$d")"
+        campo "Eta" "$eta"
+        campo "CDN" "$cdn"
+        campo "Compatibilita" "$c"
+        campo "Stato Roblox" "$s"
+        campo "Ultimo test" "$t"
+        campo "Origine hash" "$fonte"
+        print
+    done
+    nota "La disponibilita del pacchetto non equivale alla compatibilita o all'accettazione della build da parte di Roblox."
+}
+
+menuricercaversioni() {
+    local scelta
+    while true; do
+        titolo
+        sezione "Ricerca versioni"
+        voce 1 "Ricerca automatica"
+        voce 2 "Scansione completa"
+        voce 3 "Sincronizza catalogo"
+        voce 0 "Torna indietro"
+        print
+        nota "La ricerca automatica prova un numero limitato di nuove build; la scansione completa procede senza limite."
+        print
+        domanda "Scelta:"
+        IFS= read -r scelta || return 0
+        case "$scelta" in
+            (1) scansioneintelligente normale; pausa ;;
+            (2) scansioneintelligente completa; pausa ;;
+            (3) titolo; aggiornacatalogo; pausa ;;
+            (0) return 0 ;;
+            (*) ;;
+        esac
+    done
+}
+
+menuversioni() {
     local scelta n
     n="$(contafunzionali)"
     if [[ "$n" == "0" ]]; then
         titolo
-        sezione "Scaricabili e funzionali"
+        sezione "Versioni"
         info "Non esistono ancora build confermate. Avvio una prima ricerca automatica."
         scansioneintelligente normale
         pausa
     fi
     while true; do
         titolo
-        sezione "Scaricabili e funzionali"
-        voce 1 "Elenco verificato"
-        voce 2 "Trova altre versioni funzionali"
-        voce 3 "Scansione completa"
-        voce 4 "Verifica una versione specifica"
+        sezione "Versioni"
+        voce 1 "Panoramica"
+        voce 2 "Scaricabili e funzionali"
+        voce 3 "Ricerca versioni"
+        voce 4 "Verifica una versione"
+        voce 5 "Confronta versioni"
         voce 0 "Torna indietro"
         print
-        nota "Non e limitato alla versione corrente: qualsiasi build che supera i test entra nell'elenco."
+        nota "Scoperta, verifica e confronto delle build sono raccolti in questa sezione."
         print
         domanda "Scelta:"
         IFS= read -r scelta || return 0
         case "$scelta" in
-            (1) titolo; listanonoutofdate; pausa ;;
-            (2) scansioneintelligente normale; pausa ;;
-            (3) scansioneintelligente completa; pausa ;;
+            (1) panoramaversioni; pausa ;;
+            (2) titolo; listanonoutofdate; pausa ;;
+            (3) menuricercaversioni ;;
             (4) titolo; cercacatalogo; pausa ;;
+            (5) confrontaversioni; pausa ;;
             (0) return 0 ;;
             (*) ;;
         esac
@@ -2790,21 +2943,31 @@ richiedipermessi() {
 }
 
 menuarchivio() {
-    local scelta
+    local scelta v
     while true; do
         titolo
-        sezione "Archivio storico"
-        voce 1 "Versioni vecchie scaricabili"
+        sezione "Archivio"
+        voce 1 "Versioni storiche scaricabili"
         voce 2 "Cerca una build storica"
+        voce 3 "Importa una copia locale"
         voce 0 "Torna indietro"
         print
-        nota "Questa sezione e separata dall'elenco delle build funzionali."
+        nota "L'Archivio e separato dalle build confermate funzionali. Una copia storica puo essere OUT OF DATE."
         print
         domanda "Scelta:"
         IFS= read -r scelta || return 0
         case "$scelta" in
             (1) titolo; listavecchie; pausa ;;
             (2) titolo; cercacatalogo; pausa ;;
+            (3)
+                titolo
+                sezione "Importa copia locale"
+                domanda "Versione:"
+                IFS= read -r v || continue
+                v="$(print -r -- "$v" | tr -d '[:space:]')"
+                installadaarchivio "$v"
+                pausa
+                ;;
             (0) return 0 ;;
             (*) ;;
         esac
@@ -3141,16 +3304,14 @@ menucompatibilita() {
     esac
 }
 
-menuverifiche() {
+menuverificheinstallate() {
     local scelta
     while true; do
         titolo
-        sezione "Verifiche"
+        sezione "Verifica installate"
         voce 1 "Verifica una versione"
-        voce 2 "Verifica solo quelle mai controllate"
-        voce 3 "Verifica tutte le versioni"
-        voce 4 "Trova la piu vecchia ancora utilizzabile"
-        voce 5 "Compatibilita con questo Mac"
+        voce 2 "Verifica quelle non controllate"
+        voce 3 "Verifica tutte"
         voce 0 "Torna indietro"
         print
         nota "La verifica apre Roblox Studio, legge interfaccia e log e poi lo chiude."
@@ -3161,8 +3322,6 @@ menuverifiche() {
             (1) menuverificaselezione; pausa ;;
             (2) titolo; menuverificamancanti; pausa ;;
             (3) menuverificatutte; pausa ;;
-            (4) titolo; menupiuvecchia; pausa ;;
-            (5) titolo; menucompatibilita; pausa ;;
             (0) return 0 ;;
             (*) ;;
         esac
@@ -3236,7 +3395,7 @@ avviorapido() {
     spinnerferma
     if [[ -z "$migliore" ]]; then
         avviso "Nessuna versione installata risulta insieme compatibile e accettata da Roblox."
-        info "Usa Verifiche per controllare le versioni presenti, oppure Catalogo e download per scaricarne una."
+        info "Usa Installate per verificare le versioni presenti, oppure Versioni per cercarne una nuova."
         return 1
     fi
     apriapp "$migliore"
@@ -3248,26 +3407,37 @@ menuinstallate() {
         titolo
         if ! mostrainstallate; then
             print
-            pausa
-            return 0
+            voce 1 "Vai a Versioni"
+            voce 0 "Torna indietro"
+            print
+            domanda "Scelta:"
+            IFS= read -r scelta || return 0
+            [[ "$scelta" == "1" ]] && menuversioni
+            [[ "$scelta" == "0" ]] && return 0
+            continue
         fi
-        print
-        voce 1 "Apri una versione"
-        voce 2 "Blocca o sblocca gli aggiornamenti"
-        voce 3 "Rimuovi una versione"
+        voce 1 "Avvio rapido"
+        voce 2 "Apri una versione"
+        voce 3 "Verifica installate"
+        voce 4 "Compatibilita con questo Mac"
+        voce 5 "Blocco aggiornamenti"
+        voce 6 "Rimuovi una versione"
         voce 0 "Torna indietro"
         print
         domanda "Scelta:"
         IFS= read -r scelta || return 0
         case "$scelta" in
-            (1)
+            (1) avviorapido; pausa ;;
+            (2)
                 selezionaapp "Scegli la versione da aprire" || continue
                 titolo
                 apriapp "$APPSCELTA"
                 pausa
                 ;;
-            (2) menublocco; pausa ;;
-            (3)
+            (3) menuverificheinstallate ;;
+            (4) titolo; menucompatibilita; pausa ;;
+            (5) menublocco; pausa ;;
+            (6)
                 selezionaapp "Scegli la versione da rimuovere" || continue
                 titolo
                 rimuoviuna "$APPSCELTA"
@@ -3582,21 +3752,168 @@ menumanutenzione() {
     while true; do
         titolo
         sezione "Manutenzione"
-        voce 1 "Aggiorna il catalogo delle build"
-        voce 2 "Blocco aggiornamenti"
-        voce 3 "Riordina cartelle e archivi"
-        voce 4 "Pulizia"
-        voce 5 "Controlla aggiornamenti GitHub"
+        voce 1 "Pulizia"
+        voce 2 "Riordina cartelle e archivi"
         voce 0 "Torna indietro"
         print
         domanda "Scelta:"
         IFS= read -r scelta || return 0
         case "$scelta" in
-            (1) titolo; aggiornacatalogo; pausa ;;
-            (2) menublocco; pausa ;;
-            (3) titolo; sezione "Riordino"; print; spinneravvia "Riordino in corso"; ordina; spinnerferma; pausa ;;
-            (4) menupulizia ;;
-            (5) titolo; controllaaggiornamento; pausa ;;
+            (1) menupulizia ;;
+            (2) titolo; sezione "Riordino"; print; spinneravvia "Riordino in corso"; ordina; spinnerferma; pausa ;;
+            (0) return 0 ;;
+            (*) ;;
+        esac
+    done
+}
+
+controllointegrita() {
+    local fs fb meta stato_self stato_backup stato_meta
+    titolo
+    sezione "Integrita"
+    spinneravvia "Verifico i file essenziali"
+    fs="$(firmafile "$self" 2>/dev/null)"
+    fb="$(firmafile "$backupcomando" 2>/dev/null)"
+    meta="$(awk -F '\t' 'NR==1 {print $1 "|" $2 "|" $3}' "$integritafile" 2>/dev/null)"
+    [[ "$fs" == "$MANAGER_FIRMA" ]] && stato_self="valida" || stato_self="non valida"
+    [[ "$fb" == "$MANAGER_FIRMA" ]] && stato_backup="valido" || stato_backup="non valido"
+    [[ "$meta" == "$MANAGER_BUILD|$MANAGER_DATA|$MANAGER_FIRMA" ]] && stato_meta="valido" || stato_meta="non valido"
+    spinnerferma
+    campo "Comando principale" "$stato_self"
+    campo "Copia di recupero" "$stato_backup"
+    campo "Metadati integrita" "$stato_meta"
+    campo "Firma" "$MANAGER_FIRMA"
+    if [[ "$stato_self" == "valida" && "$stato_backup" == "valido" && "$stato_meta" == "valido" ]]; then
+        print
+        ok "I file essenziali corrispondono alla firma prevista."
+    else
+        print
+        errore "Uno o piu file essenziali non corrispondono alla firma prevista."
+        nota "Riavvia il manager per tentare il ripristino automatico oppure reinstalla la release ufficiale."
+    fi
+}
+
+mostrapercorsi() {
+    titolo
+    sezione "Percorsi"
+    campo "Base" "$base"
+    campo "Versioni" "$versioni"
+    campo "Archivio" "$archivio"
+    campo "Strumenti" "$strumenti"
+    campo "Temporanei" "$temporanei"
+    campo "Log Roblox" "$logroot"
+}
+
+mostrapermessi() {
+    local fd au ac scelta
+    while true; do
+        titolo
+        sezione "Permessi"
+        if permessodownload; then fd="abilitato"; else fd="mancante"; fi
+        if permessoautomazione; then au="abilitata"; else au="mancante"; fi
+        if [[ "$(accessibilita)" == "si" ]]; then ac="abilitata"; else ac="mancante"; fi
+        campo "Download" "$fd"
+        campo "Automazione" "$au"
+        campo "Accessibilita" "$ac"
+        print
+        voce 1 "Richiedi i permessi mancanti"
+        voce 0 "Torna indietro"
+        print
+        domanda "Scelta:"
+        IFS= read -r scelta || return 0
+        case "$scelta" in
+            (1) richiedipermessi ;;
+            (0) return 0 ;;
+            (*) ;;
+        esac
+    done
+}
+
+menuretecache() {
+    local scelta rete n
+    while true; do
+        titolo
+        sezione "Rete e cache"
+        spinneravvia "Controllo la connessione"
+        if reteattiva; then rete="raggiungibile"; else rete="non raggiungibile"; fi
+        n="$(awk -F '\t' 'NF>=3 {n++} END {print n+0}' "$webcache" 2>/dev/null)"
+        spinnerferma
+        campo "Server Roblox" "$rete"
+        campo "Voci cache CDN" "$n"
+        campo "Durata cache CDN" "12 ore"
+        print
+        voce 1 "Svuota cache CDN"
+        voce 0 "Torna indietro"
+        print
+        domanda "Scelta:"
+        IFS= read -r scelta || return 0
+        case "$scelta" in
+            (1)
+                : > "$webcache"
+                ok "Cache CDN svuotata."
+                pausa
+                ;;
+            (0) return 0 ;;
+            (*) ;;
+        esac
+    done
+}
+
+mostraprivacy() {
+    titolo
+    sezione "Privacy e dati"
+    campo "Catalogo" "locale"
+    campo "Stato verifiche" "locale"
+    campo "Compatibilita" "locale"
+    campo "Cache CDN" "locale"
+    campo "Credenziali" "non memorizzate"
+    campo "Telemetria manager" "nessuna"
+    print
+    nota "I dati runtime restano nella cartella Strumenti e sono esclusi dal repository Git."
+}
+
+menuimpostazioni() {
+    local scelta
+    while true; do
+        titolo
+        sezione "Impostazioni"
+        voce 1 "Percorsi"
+        voce 2 "Permessi"
+        voce 3 "Rete e cache"
+        voce 4 "Privacy e dati"
+        voce 0 "Torna indietro"
+        print
+        domanda "Scelta:"
+        IFS= read -r scelta || return 0
+        case "$scelta" in
+            (1) mostrapercorsi; pausa ;;
+            (2) mostrapermessi ;;
+            (3) menuretecache ;;
+            (4) mostraprivacy; pausa ;;
+            (0) return 0 ;;
+            (*) ;;
+        esac
+    done
+}
+
+menustrumenti() {
+    local scelta
+    while true; do
+        titolo
+        sezione "Strumenti"
+        voce 1 "Diagnostica"
+        voce 2 "Manutenzione"
+        voce 3 "Integrita"
+        voce 4 "Aggiornamenti"
+        voce 0 "Torna indietro"
+        print
+        domanda "Scelta:"
+        IFS= read -r scelta || return 0
+        case "$scelta" in
+            (1) diagnostica; pausa ;;
+            (2) menumanutenzione ;;
+            (3) controllointegrita; pausa ;;
+            (4) titolo; controllaaggiornamento; pausa ;;
             (0) return 0 ;;
             (*) ;;
         esac
@@ -3664,25 +3981,23 @@ avviaguardia
 while true; do
     titolo
     print
-    voce 1 "Scaricabili e funzionali"
-    voce 2 "Avvio rapido"
-    voce 3 "Versioni installate"
-    voce 4 "Archivio storico"
-    voce 5 "Manutenzione"
-    voce 6 "Diagnostica"
+    voce 1 "Versioni"
+    voce 2 "Installate"
+    voce 3 "Archivio"
+    voce 4 "Strumenti"
+    voce 5 "Impostazioni"
     voce 0 "Esci"
     print
-    nota "La categoria principale contiene solo build realmente testate, scaricabili e non OUT OF DATE."
+    nota "Ogni funzione e raccolta nella propria area per mantenere il menu essenziale e non ripetitivo."
     print
     domanda "Scelta:"
     IFS= read -r scelta || exit 0
     case "$scelta" in
-        (1) menucatalogo ;;
-        (2) avviorapido; pausa ;;
-        (3) menuinstallate ;;
-        (4) menuarchivio ;;
-        (5) menumanutenzione ;;
-        (6) diagnostica; pausa ;;
+        (1) menuversioni ;;
+        (2) menuinstallate ;;
+        (3) menuarchivio ;;
+        (4) menustrumenti ;;
+        (5) menuimpostazioni ;;
         (0) exit 0 ;;
         (*) ;;
     esac

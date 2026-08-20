@@ -2,7 +2,7 @@
 
 Roblox Studio Manager is a macOS terminal utility for discovering, downloading, testing and organizing multiple Roblox Studio versions.
 
-The manager separates currently usable builds from historical archive builds and keeps availability, compatibility and runtime checks in one interface.
+The manager separates currently usable builds from historical archive builds and keeps discovery, installation, maintenance and configuration grouped into dedicated sections.
 
 ## Features
 
@@ -11,9 +11,12 @@ The manager separates currently usable builds from historical archive builds and
 - Identify builds that are still functional
 - Detect `OUT OF DATE` builds through runtime checks
 - Check macOS and CPU compatibility
+- Compare two catalogued builds
+- View a summary of verified, installed and historical versions
 - Manage multiple installed versions
 - Keep legacy builds in a separate archive section
-- Block unwanted automatic updates on archived copies
+- Import signed historical copies from a local archive
+- Block unwanted automatic updates on installed copies
 - Verify CDN availability
 - Track previous test results locally
 - Restore required internal manager files while the manager is running
@@ -71,29 +74,31 @@ The manager may require Files and Folders, Accessibility and Automation permissi
 
 ## Main Sections
 
-### Downloadable and Functional
+### Versions
 
-Contains builds that have passed the required checks and are considered usable on the current Mac. A build must be downloadable, compatible, successfully launched, not detected as `OUT OF DATE` and recently verified.
+Contains the version overview, verified downloadable builds, version discovery, individual verification and build comparison.
 
-### Installed Versions
+A build is shown as functional only after a recent runtime test and a compatible Mac result. Package availability alone is not treated as proof that a build still works.
 
-Shows Roblox Studio versions stored locally and their current status.
+### Installed
 
-### Verification
+Shows Roblox Studio versions stored locally and groups launch, runtime verification, compatibility, update blocking and removal in one section.
 
-Tests individual builds and updates their compatibility and runtime status.
+### Archive
 
-### Historical Archive
+Contains older builds intended primarily for archival and preservation purposes and supports importing locally stored signed copies. Package availability does not guarantee that Roblox currently accepts a historical version online.
 
-Contains older builds intended primarily for archival and preservation purposes. Package availability does not guarantee that Roblox currently accepts a historical version online.
+### Tools
 
-### Maintenance
+Contains diagnostics, maintenance, integrity verification and manager update checks.
 
-Provides cleanup, integrity checks, update checks and local manager maintenance.
+### Settings
+
+Contains paths, required macOS permissions, network and CDN cache information, and local data information.
 
 ## Security
 
-Version 4.2.1 adds stricter validation before downloaded or archived applications can be opened.
+Version 4.3.0 keeps the security hardening introduced in 4.2.1 and reorganizes operations so related actions are easier to identify and audit.
 
 The manager:
 
@@ -106,12 +111,13 @@ The manager:
 - checks installed applications again before launch or runtime testing
 - does not automatically execute manager updates downloaded from the Internet
 - limits cleanup operations to files owned by the manager workflow
+- defers terminal resize layout changes until a safe render point
 
 The internal SHA-256 integrity system detects accidental corruption and supports runtime recovery. It is not a substitute for operating-system code signing and cannot make a shell script impossible for the local computer owner or sufficiently privileged malware to modify.
 
 ## Updating
 
-Check for stable releases from the Maintenance menu or update the repository manually:
+Check for stable releases under `Tools > Updates` or update the repository manually:
 
 ```bash
 cd ~/Downloads/robloxstudiomanager

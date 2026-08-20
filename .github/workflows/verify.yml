@@ -39,6 +39,8 @@ jobs:
               sys.exit(1)
           if script_path.read_bytes() != backup_path.read_bytes():
               sys.exit(1)
+          if 'MANAGER_BUILD="4.3.0"' not in script:
+              sys.exit(1)
           comments = [line for line in script.splitlines() if re.match(r'^\s*#', line)]
           if comments != ['#!/bin/zsh']:
               sys.exit(1)
